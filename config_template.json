@@ -1,0 +1,258 @@
+{
+  "log": {
+    "access": "none",
+    "dnsLog": false,
+    "error": "./error.log",
+    "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "127.0.0.1",
+      "port": 62789,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIP"
+      }
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole",
+      "settings": {}
+    },
+    {
+      "tag": "IPv4",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      }
+    },
+    {
+      "tag": "HA5-1",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h1.smatiz.info",
+            "port": 44445,
+            "users": [
+              {
+                "user": "gargallow",
+                "pass": "mashin"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "HA5-2",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h2.smatiz.info",
+            "port": 44445,
+            "users": [
+              {
+                "user": "gargallow",
+                "pass": "mashin"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "HA5-3",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h3.smatiz.info",
+            "port": 44445,
+            "users": [
+              {
+                "user": "gargallow",
+                "pass": "mashin"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "HA5-4",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h4.smatiz.info",
+            "port": 44445,
+            "users": [
+              {
+                "user": "gargallow",
+                "pass": "mashin"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "HA5-5",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h5.smatiz.info",
+            "port": 44445,
+            "users": [
+              {
+                "user": "gargallow",
+                "pass": "mashin"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true,
+      "statsOutboundDownlink": true,
+      "statsOutboundUplink": true
+    }
+  },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "domain": [
+          "geosite:category-ads-all",
+          "ext:geosite_IR.dat:category-ads-all"
+        ],
+        "inboundTag": [
+          "inbound-2052",
+          "inbound-2053",
+          "inbound-2082",
+          "inbound-2086",
+          "inbound-2087",
+          "inbound-2095",
+          "inbound-2096",
+          "inbound-443",
+          "inbound-80",
+          "inbound-8080",
+          "inbound-8443",
+          "inbound-8880",
+          "inbound-2198"
+        ],
+        "balancerTag": "HA"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "ip": [
+          "geoip:private"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      },
+      {
+        "type": "field",
+        "domain": [
+          "ext:geosite_IR.dat:malware",
+          "ext:geosite_IR.dat:phishing",
+          "ext:geosite_IR.dat:cryptominers",
+          "geosite:speedtest"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": [
+          "ext:geoip_IR.dat:ir",
+          "geoip:cn",
+          "geoip:ru"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": [
+          "regexp:.*\\.ir$",
+          "regexp:.*\\.xn--mgba3a4f16a$",
+          "ext:geosite_IR.dat:ir",
+          "geosite:cn",
+          "regexp:.*\\.cn$",
+          "geosite:category-gov-ru",
+          "regexp:.*\\.ru$"
+        ]
+      },
+      {
+        "type": "field",
+        "outboundTag": "IPv4",
+        "domain": [
+          "geosite:netflix",
+          "geosite:google"
+        ]
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "HA",
+        "selector": [
+          "HA5-1",
+          "HA5-2",
+          "HA5-3",
+          "HA5-4",
+          "HA5-5"
+        ],
+        "fallbackTag": "",
+        "strategy": {
+          "type": "roundRobin"
+        }
+      }
+    ]
+  },
+  "stats": {}
+}
