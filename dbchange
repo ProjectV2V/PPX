@@ -1,18 +1,17 @@
 #!/bin/bash
 set -e
 
-echo "Starting X-UI Outbound Replacement (Robust Version)..."
+echo "Starting X-UI Outbound Replacement (ULTRA-ROBUST Version - Final Fix Attempt)..."
 
 # --- Configuration ---
 XRAY_CONFIG_PATH="/usr/local/x-ui/bin/config.json"
 XUI_SERVICE_NAME="x-ui"
 
 # !!! URL فایل JSON حاوی لیست پروکسی‌ها برای تخصیص به سرورها !!!
-PROXIES_DATA_URL="https://raw.githubusercontent.com/ProjectV2V/PPX/main/proxies_for_test.json" # از این برای گرفتن 5 پروکسی استفاده میشود
+PROXIES_DATA_URL="https://raw.githubusercontent.com/ProjectV2V/PPX/main/proxies_for_test.json"
 
 # !!! URL تمپلت config.json شما از گیت‌هاب !!!
-# این را با لینک RAW فایل config_template.json خود جایگزین کنید.
-CONFIG_TEMPLATE_URL="https://raw.githubusercontent.com/ProjectV2V/PPX/refs/heads/main/config_template.json" # <--- این خط را حتما جایگزین کنید
+CONFIG_TEMPLATE_URL="https://raw.githubusercontent.com/ProjectV2V/PPX/refs/heads/main/config_template.json" # <--- این خط را حتماً جایگزین کنید اگر تغییر کرده است
 
 # --- Check for Prerequisites ---
 echo "Checking for 'jq' and 'curl'..."
@@ -61,44 +60,200 @@ echo "$SERVER_PROXIES" | jq '.'
 # --- Modify Config Template based on selected proxies ---
 echo "Modifying config template with new proxy details..."
 
-# Convert SERVER_PROXIES JSON array to a shell array of JSON objects
-readarray -t PROXY_OBJECTS <<<"$(echo "$SERVER_PROXIES" | jq -c '.[]')"
+# --- Temp files for JQ scripts ---
+JQ_TEMP_REMOVE_OLD_OUTBOUNDS="/tmp/jq_remove_old_outbounds_$$.jq"
+JQ_TEMP_REMOVE_OLD_ROUTING="/tmp/jq_remove_old_routing_$$.jq"
+JQ_TEMP_BALANCER_ADD="/tmp/jq_balancer_add_$$.jq"
+JQ_TEMP_ROUTING_ADD="/tmp/jq_routing_add_$$.jq"
 
-# Replace HA5-1 to HA5-5 outbounds with new proxy details
-# This uses a series of jq updates, assuming HA5-X tags exist and are sequential.
-MODIFIED_CONFIG_JSON="$CONFIG_JSON_CONTENT"
+# Clean up temp files on exit
+trap "rm -f $JQ_TEMP_REMOVE_OLD_OUTBOUNDS $JQ_TEMP_REMOVE_OLD_ROUTING $JQ_TEMP_BALANCER_ADD $JQ_TEMP_ROUTING_ADD" EXIT 
+
+
+# 1. Remove old Outbounds (with specific tags) and balancer
+echo 'del(.outbounds[] | select(.tag | startswith("purchased_proxy_") or . == "balancer_purchased_proxies"))' > "$JQ_TEMP_REMOVE_OLD_OUTBOUNDS"
+MODIFIED_CONFIG_JSON=$(echo "$CONFIG_JSON_CONTENT" | jq -f "$JQ_TEMP_REMOVE_OLD_OUTBOUNDS")
+
+
+# 2. Remove old routing rules related to the balancer
+echo 'del(.routing.rules[] | select(.outboundTag == "purchased_proxies_balancer"))' > "$JQ_TEMP_REMOVE_OLD_ROUTING"
+MODIFIED_CONFIG_JSON=$(echo "$MODIFIED_CONFIG_JSON" | jq -f "$JQ_TEMP_REMOVE_OLD_ROUTING")
+
+
+# 3. Update specific HA5-X outbounds with new proxy details
+# Build the update filters dynamically and then apply.
+declare -a JQ_UPDATE_FILTERS # Array to hold multiple jq update command parts
 
 for i in $(seq 0 4); do # Loop for 0 to 4 to match array indices
-    PROXY_JSON_OBJ="${PROXY_OBJECTS[$i]}"
-    PROXY_TYPE=$(echo "$PROXY_JSON_OBJ" | jq -r '.type')
-    PROXY_IP=$(echo "$PROXY_JSON_OBJ" | jq -r '.ip')
-    PROXY_PORT=$(echo "$PROXY_JSON_OBJ" | jq -r '.port')
-    PROXY_USER=$(echo "$PROXY_JSON_OBJ" | jq -r '.user')
-    PROXY_PASS=$(echo "$PROXY_JSON_OBJ" | jq -r '.pass')
+    PROXY_JSON_OBJ="${PROXY_OBJECTS[$i]}" # This variable is not correctly defined in the previous version, needs to be derived from SERVER_PROXIES
+    # Extract proxy details from SERVER_PROXIES for this iteration.
+    # This requires re-parsing SERVER_PROXIES each time, or storing it as a bash array of objects initially.
+    # Let's re-extract inside the loop for simplicity and robustness.
+    
+    PROXY_ENTRY=$(echo "$SERVER_PROXIES" | jq -c ".[$i]") # Get the i-th proxy object
+
+    PROXY_TYPE=$(echo "$PROXY_ENTRY" | jq -r '.type' | tr -d '\r') # Clean \r
+    PROXY_IP=$(echo "$PROXY_ENTRY" | jq -r '.ip' | tr -d '\r') # Clean \r
+    PROXY_PORT=$(echo "$PROXY_ENTRY" | jq -r '.port' | tr -d '\r') # Clean \r
+    PROXY_USER=$(echo "$PROXY_ENTRY" | jq -r '.user' | tr -d '\r') # Clean \r
+    PROXY_PASS=$(echo "$PROXY_ENTRY" | jq -r '.pass' | tr -d '\r') # Clean \r
+
     TAG_TO_REPLACE="HA5-$((i + 1))" # HA5-1, HA5-2, ...
 
-    USERS_JSON_PART=""
+    USERS_PART_FOR_JQ=""
     if [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ]; then
-        USERS_JSON_PART="{ \"user\": \"$PROXY_USER\", \"\"pass\": \"$PROXY_PASS\" }"
+        USERS_PART_FOR_JQ="{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}"
     fi
 
-    # Update the existing outbound
-    # This jq command uses --argjson to pass the new server details cleanly.
-    MODIFIED_CONFIG_JSON=$(echo "$MODIFIED_CONFIG_JSON" | jq --arg tag "$TAG_TO_REPLACE" \
-    --arg new_address "$PROXY_IP" \
-    --argjson new_port "$PROXY_PORT" \
-    --arg new_user "$PROXY_USER" \
-    --arg new_pass "$PROXY_PASS" \
-    '(.outbounds[] | select(.tag == $tag).settings.servers[0].address) = $new_address |
-     (.outbounds[] | select(.tag == $tag).settings.servers[0].port) = $new_port |
-     # Conditionally update users array, recreating it if needed
-     if $new_user != "" and $new_pass != "" then
-       (.outbounds[] | select(.tag == $tag).settings.servers[0].users) = [{"user": $new_user, "pass": $new_pass}]
-     else
-       (.outbounds[] | select(.tag == $tag).settings.servers[0] | del(.users))
-     end
-    ')'
+    # Build the jq filter string for updating this specific outbound
+    # This must be carefully quoted to avoid shell interpretation issues
+    # Using --arg and map() to target the specific tag
+    
+    # We build the entire filter as a single string per loop iteration
+    # and then apply them sequentially or combine them.
+    # Let's combine them into one larger jq program at the end.
+
+    JQ_FILTER_FOR_THIS_OUTBOUND="
+        (.outbounds[] | select(.tag == \"$TAG_TO_REPLACE\")) |= (
+            .protocol = \"$PROXY_TYPE\" |
+            .settings.servers[0].address = \"$PROXY_IP\" |
+            .settings.servers[0].port = ${PROXY_PORT}" # PORT is numerical, no quotes
+
+    if [ -n "$USERS_PART_FOR_JQ" ]; then
+        JQ_FILTER_FOR_THIS_OUTBOUND+=" | .settings.servers[0].users = [$USERS_PART_FOR_JQ]"
+    else
+        JQ_FILTER_FOR_THIS_OUTBOUND+=" | .settings.servers[0] |= del(.users)"
+    fi
+    JQ_FILTER_FOR_THIS_OUTBOUND+=" )" # Closing parenthesis for map()
+
+    JQ_UPDATE_FILTERS+=("$JQ_FILTER_FOR_THIS_OUTBOUND")
 done
+
+# Combine all individual update filters into one comprehensive jq program
+# and apply it to the JSON content.
+FULL_JQ_UPDATE_PROGRAM_CONTENT=$(printf "%s | " "${JQ_UPDATE_FILTERS[@]}" | sed 's/ | $//')
+# Wrap it in a map() function if applying to an array of objects
+
+# The previous logic was applying individual filters outside map,
+# let's make it a single map operation for all outbounds.
+
+cat > /tmp/jq_update_all_outbounds_$$.jq <<EOF_JQ_UPDATE_ALL_OUTBOUNDS_FILE
+.outbounds |= map(
+    # Iterate through all outbounds and apply conditional updates
+    . as \$item |
+    $(printf "%s\n" "${JQ_UPDATE_FILTERS[@]}" | sed 's/^\s*//') # Remove leading spaces
+    # This block requires a complex structure to apply updates based on specific tags inside map()
+    # A cleaner approach: Use sequential updates on specific tags.
+    # JQ_UPDATE_FILTERS contains expressions like `(.outbounds[] | select(.tag == "HA5-1")) |= ...`
+    # We need to apply these sequentially. No need for a single map() in the final jq call.
+)
+EOF_JQ_UPDATE_ALL_OUTBOUNDS_FILE
+
+# The previous single-line JQ_UPDATE_FILTERS logic might be the problem.
+# Revert to sequential jq calls, each targeting one HA5-X tag.
+# This makes it robust.
+for i in $(seq 0 4); do
+    PROXY_ENTRY=$(echo "$SERVER_PROXIES" | jq -c ".[$i]")
+    PROXY_TYPE=$(echo "$PROXY_ENTRY" | jq -r '.type' | tr -d '\r')
+    PROXY_IP=$(echo "$PROXY_ENTRY" | jq -r '.ip' | tr -d '\r')
+    PROXY_PORT=$(echo "$PROXY_ENTRY" | jq -r '.port' | tr -d '\r')
+    PROXY_USER=$(echo "$PROXY_ENTRY" | jq -r '.user' | tr -d '\r')
+    PROXY_PASS=$(echo "$PROXY_ENTRY" | jq -r '.pass' | tr -d '\r')
+    TAG_TO_REPLACE="HA5-$((i + 1))"
+
+    USERS_PART_FOR_JQ_ARG=""
+    if [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ]; then
+        USERS_PART_FOR_JQ_ARG="{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}"
+    fi
+
+    # Write the specific update filter for this HA5-X tag to a temp file
+    TEMP_JQ_UPDATE_SPECIFIC_OUTBOUND="/tmp/jq_update_specific_outbound_${TAG_TO_REPLACE}_$$.jq"
+    cat > "$TEMP_JQ_UPDATE_SPECIFIC_OUTBOUND" <<EOF_JQ_UPDATE_SPECIFIC_OUTBOUND_FILE
+(.outbounds[] | select(.tag == "\$tag_val")) |= (
+    .protocol = "\$proxy_type_val" |
+    .settings.servers[0].address = "\$proxy_ip_val" |
+    .settings.servers[0].port = \$proxy_port_val
+    $(if [ -n "$USERS_PART_FOR_JQ_ARG" ]; then
+        echo "| .settings.servers[0].users = [$USERS_PART_FOR_JQ_ARG]"
+    else
+        echo "| .settings.servers[0] |= del(.users)"
+    fi)
+)
+EOF_JQ_UPDATE_SPECIFIC_OUTBOUND_FILE
+
+    MODIFIED_CONFIG_JSON=$(echo "$MODIFIED_CONFIG_JSON" | jq \
+        --arg tag_val "$TAG_TO_REPLACE" \
+        --arg proxy_type_val "$PROXY_TYPE" \
+        --arg proxy_ip_val "$PROXY_IP" \
+        --argjson proxy_port_val "$PROXY_PORT" \
+        -f "$TEMP_JQ_UPDATE_SPECIFIC_OUTBOUND")
+
+    rm -f "$TEMP_JQ_UPDATE_SPECIFIC_OUTBOUND" # Clean up temp file for this iteration
+done
+
+
+# 4. Add new Balancer - Write JQ program to temp file
+NEW_OUTBOUND_TAGS_STR=$(printf "%s," "${OUTBOUND_TAGS_FOR_BALANCER[@]}" | sed 's/,$//')
+cat > "$JQ_TEMP_ADD_BALANCER" <<'EOF_JQ_ADD_BALANCER_FILE'
+.routing.balancers |= (
+    . + [
+        {
+            "tag": "purchased_proxies_balancer",
+            "selector": \$tags_selector,
+            "strategy": {
+                "type": "leastLoad" # or "roundRobin"
+            }
+        }
+    ]
+)
+EOF_JQ_ADD_BALANCER_FILE
+
+# Execute JQ from temp file
+MODIFIED_CONFIG_JSON=$(echo "$MODIFIED_CONFIG_JSON" | jq --argjson tags_selector "[${NEW_OUTBOUND_TAGS_STR}]" -f "$JQ_TEMP_ADD_BALANCER")
+
+
+# 5. Add routing rules to use the balancer - Write JQ program to temp file
+cat > "$JQ_TEMP_ADD_ROUTING" <<'EOF_JQ_ADD_ROUTING_FILE'
+.routing.rules |= (
+    [
+        # Basic rules that should be at the top
+        {
+            "type": "field",
+            "ip": ["geoip:private"],
+            "outboundTag": "direct"
+        },
+        {
+            "type": "field",
+            "ip": ["ext:geoip_IR.dat:ir"],
+            "outboundTag": "direct"
+        },
+        {
+            "type": "field",
+            "domain": ["regexp:.*\\.ir$"],
+            "outboundTag": "direct"
+        },
+        # Main rule to send remaining traffic through the balancer
+        {
+            "type": "field",
+            "outboundTag": "purchased_proxies_balancer"
+        }
+    ] + 
+    (
+        . - [
+            .[] | select(
+                .outboundTag == "purchased_proxies_balancer" or
+                (.outboundTag == "direct" and (
+                    (has("ip") and (any(.ip[]; . == "geoip:private" or . == "ext:geoip_IR.dat:ir"))) or 
+                    (has("domain") and (any(.domain[]; . == "regexp:.*\\.ir$")) )
+                ))
+            ) 
+        )
+    )
+)
+EOF_JQ_ADD_ROUTING_FILE
+
+# Execute JQ from temp file
+MODIFIED_CONFIG_JSON=$(echo "$MODIFIED_CONFIG_JSON" | jq -f "$JQ_TEMP_ADD_ROUTING")
 
 
 # --- Backup existing Xray config on server ---
