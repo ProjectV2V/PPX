@@ -1,6 +1,6 @@
 [
   {
-    "server_ip": "45.89.111.211"
+    "server_ip": "45.89.111.211",
     "proxies": [
       {"type": "socks5", "ip": "192.228.122.20", "port": 44445, "user": "gargallow", "pass": "mashin"},
       {"type": "socks5", "ip": "192.228.122.140", "port": 44445, "user": "gargallow", "pass": "mashin"},
