@@ -1,0 +1,191 @@
+#!/bin/bash
+set -e
+
+echo "Starting X-UI Outbound and Balancer Configuration (Robust Version)..."
+
+# --- Configuration ---
+XRAY_CONFIG_PATH="/usr/local/x-ui/bin/config.json"
+XUI_SERVICE_NAME="x-ui"
+
+# !!! این URL شما از گیت‌هاب است، کاملاً صحیح و آماده استفاده !!!
+PROXIES_DATA_URL="https://raw.githubusercontent.com/ProjectV2V/PPX/main/proxies_for_test.json"
+
+# --- Check for Prerequisites ---
+echo "Checking for 'jq' and 'curl'..."
+if ! command -v jq &> /dev/null; then
+    echo "Error: 'jq' is not installed. Please install it manually or ensure it's available in your environment."
+    exit 1
+fi
+if ! command -v curl &> /dev/null; then
+    echo "Error: 'curl' is not installed. Please install it manually or ensure it's available in your environment."
+    exit 1
+fi
+
+# --- Download and Extract Proxies for this Server ---
+echo "Downloading proxy list from ${PROXIES_DATA_URL}..."
+ALL_PROXIES_JSON=$(curl -s "$PROXIES_DATA_URL")
+if [ -z "$ALL_PROXIES_JSON" ]; then
+    echo "Error: Could not download proxy file from ${PROXIES_DATA_URL} or file is empty."
+    exit 1
+fi
+
+# Get the primary IP of the current X-UI server
+CURRENT_SERVER_IP=$(hostname -I | awk '{print $1}')
+echo "Current server IP: ${CURRENT_SERVER_IP}"
+
+# Extract proxies relevant to this server from the JSON
+SERVER_PROXIES=$(echo "$ALL_PROXIES_JSON" | jq --arg ip "$CURRENT_SERVER_IP" '.[] | select(.server_ip == $ip) | .proxies')
+
+if [ "$(echo "$SERVER_PROXIES" | jq '. | length')" -eq 0 ]; then
+    echo "Error: No proxies found for this server (${CURRENT_SERVER_IP}) in the JSON file."
+    echo "Ensure the server's IP is correctly listed in the JSON and matches 'hostname -I | awk '{print \$1}'."
+    exit 1
+fi
+
+echo "Proxies found for this server: (See next lines)"
+echo "$SERVER_PROXIES" | jq '.'
+
+# --- Backup existing Xray configuration ---
+if [ ! -f "$XRAY_CONFIG_PATH" ]; then
+    echo "Error: Xray config file not found at ${XRAY_CONFIG_PATH}."
+    echo "Please verify the correct path in the script."
+    exit 1
+fi
+
+echo "Backing up Xray config: ${XRAY_CONFIG_PATH}.bak_$(date +%Y%m%d%H%M%S)"
+cp "$XRAY_CONFIG_PATH" "${XRAY_CONFIG_PATH}.bak_$(date +%Y%m%d%H%M%S)"
+
+# --- Modify Xray Configuration ---
+echo "Modifying Xray config..."
+
+# --- Temp files for JQ scripts ---
+JQ_TEMP_BALANCER="/tmp/jq_balancer_script_$$.jq"
+JQ_TEMP_ROUTING="/tmp/jq_routing_script_$$.jq"
+trap "rm -f $JQ_TEMP_BALANCER $JQ_TEMP_ROUTING" EXIT # Clean up temp files on exit
+
+# 1. Remove old Outbounds (with specific tags) and balancer
+jq 'del(.outbounds[] | select(.tag | startswith("purchased_proxy_") or . == "balancer_purchased_proxies"))' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
+
+# 2. Remove old routing rules related to the balancer
+jq 'del(.routing.rules[] | select(.outboundTag == "purchased_proxies_balancer"))' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
+
+# 3. Add new Outbounds (purchased proxies)
+NEW_OUTBOUND_TAGS=()
+OUTBOUNDS_TO_ADD_ARRAY=()
+PROXY_COUNT=0
+echo "$SERVER_PROXIES" | jq -c '.[]' | while read -r proxy; do
+    PROXY_COUNT=$((PROXY_COUNT + 1))
+    PROXY_TYPE=$(echo "$proxy" | jq -r '.type')
+    PROXY_IP=$(echo "$proxy" | jq -r '.ip')
+    PROXY_PORT=$(echo "$proxy" | jq -r '.port')
+    PROXY_USER=$(echo "$proxy" | jq -r '.user')
+    PROXY_PASS=$(echo "$proxy" | jq -r '.pass')
+    TAG="purchased_proxy_${PROXY_COUNT}"
+    NEW_OUTBOUND_TAGS+=("\"$TAG\"")
+
+    USERS_JSON_PART=""
+    if [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ]; then
+        USERS_JSON_PART="\"users\": [ { \"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\" } ],"
+    fi
+
+    # Build JSON for each Outbound
+    OUTBOUND_JSON_SNIPPET="{
+        \"protocol\": \"$PROXY_TYPE\",
+        \"settings\": {
+            \"servers\": [
+                {
+                    \"address\": \"$PROXY_IP\",
+                    \"port\": $PROXY_PORT,
+                    $USERS_JSON_PART
+                    \"ota\": false,
+                    \"level\": 0
+                }
+            ]
+        },
+        \"tag\": \"$TAG\",
+        \"streamSettings\": {}
+    }"
+    OUTBOUNDS_TO_ADD_ARRAY+=("$OUTBOUND_JSON_SNIPPET")
+done
+
+JOINED_OUTBOUNDS_TO_ADD=$(IFS=,; echo "${OUTBOUNDS_TO_ADD_ARRAY[*]}")
+jq --argjson new_outbounds_str "[${JOINED_OUTBOUNDS_TO_ADD}]" '.outbounds |= . + $new_outbounds_str' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
+
+
+# 4. Add new Balancer - Write JQ program to temp file
+NEW_OUTBOUND_TAGS_STR=$(printf "%s," "${NEW_OUTBOUND_TAGS[@]}" | sed 's/,$//')
+cat > "$JQ_TEMP_BALANCER" <<EOF_JQ_BALANCER_FILE
+.routing.balancers |= (
+    . + [
+        {
+            "tag": "purchased_proxies_balancer",
+            "selector": \$tags_selector,
+            "strategy": {
+                "type": "leastLoad" # or "roundRobin"
+            }
+        }
+    ]
+)
+EOF_JQ_BALANCER_FILE
+
+# Execute JQ from temp file
+jq --argjson tags_selector "[${NEW_OUTBOUND_TAGS_STR}]" -f "$JQ_TEMP_BALANCER" "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
+
+
+# 5. Add routing rules to use the balancer - Write JQ program to temp file
+cat > "$JQ_TEMP_ROUTING" <<EOF_JQ_ROUTING_FILE
+.routing.rules |= (
+    [
+        # Basic rules that should be at the top
+        {
+            "type": "field",
+            "ip": ["geoip:private"],
+            "outboundTag": "direct"
+        },
+        {
+            "type": "field",
+            "ip": ["ext:geoip_IR.dat:ir"],
+            "outboundTag": "direct"
+        },
+        {
+            "type": "field",
+            "domain": ["regexp:.*\\.ir$"],
+            "outboundTag": "direct"
+        },
+        # Main rule to send remaining traffic through the balancer
+        {
+            "type": "field",
+            "outboundTag": "purchased_proxies_balancer"
+        }
+    ] + 
+    (
+        . - [
+            .[] | select(
+                .outboundTag == "purchased_proxies_balancer" or
+                (.outboundTag == "direct" and (
+                    (has("ip") and (any(.ip[]; . == "geoip:private" or . == "ext:geoip_IR.dat:ir"))) or 
+                    (has("domain") and (any(.domain[]; . == "regexp:.*\\.ir$")) )
+                ))
+            ) 
+        )
+    )
+)
+EOF_JQ_ROUTING_FILE
+
+# Execute JQ from temp file
+jq -f "$JQ_TEMP_ROUTING" "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
+
+
+echo "Xray config updated successfully."
+
+# --- Restart X-UI Service ---
+echo "Restarting X-UI service..."
+systemctl restart "$XUI_SERVICE_NAME"
+if systemctl is-active --quiet "$XUI_SERVICE_NAME"; then
+    echo "X-UI service restarted successfully."
+else
+    echo "Error: X-UI service is not active after restart. Please check logs."
+    exit 1
+fi
+
+echo "New proxies with balancer activated on this X-UI server."
