@@ -108,73 +108,7 @@ done
 JOINED_OUTBOUNDS_TO_ADD=$(IFS=,; echo "${OUTBOUNDS_TO_ADD_ARRAY[*]}")
 jq --argjson new_outbounds_str "[${JOINED_OUTBOUNDS_TO_ADD}]" '.outbounds |= . + $new_outbounds_str' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
 
+
 # 4. Add new Balancer
 NEW_OUTBOUND_TAGS_STR=$(printf "%s," "${NEW_OUTBOUND_TAGS[@]}" | sed 's/,$//')
-jq --argjson tags_selector "[${NEW_OUTBOUND_TAGS_STR}]" '
-.routing.balancers |= (
-    . + [
-        {
-            "tag": "purchased_proxies_balancer",
-            "selector": $tags_selector,
-            "strategy": {
-                "type": "leastLoad" # or "roundRobin"
-            }
-        }
-    ]
-)' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
-
-# 5. Add routing rules to use the balancer
-# These rules route traffic, excluding private IPs and Iran traffic, through the balancer.
-jq '
-    .routing.rules |= (
-        [
-            # Basic rules that should be at the top
-            {
-                "type": "field",
-                "ip": ["geoip:private"],
-                "outboundTag": "direct"
-            },
-            {
-                "type": "field",
-                "ip": ["ext:geoip_IR.dat:ir"],
-                "outboundTag": "direct"
-            },
-            {
-                "type": "field",
-                "domain": ["regexp:.*\\.ir$"],
-                "outboundTag": "direct"
-            },
-            # Main rule to send remaining traffic through the balancer
-            {
-                "type": "field",
-                "outboundTag": "purchased_proxies_balancer"
-            }
-        ] + 
-        (
-            . - [
-                .[] | select(
-                    .outboundTag == "purchased_proxies_balancer" or
-                    (.outboundTag == "direct" and (
-                        (has("ip") and (any(.ip[]; . == "geoip:private" or . == "ext:geoip_IR.dat:ir"))) or 
-                        (has("domain") and (any(.domain[]; . == "regexp:.*\\.ir$")) )
-                    ))
-                ) 
-            )
-        )
-    )
-' "$XRAY_CONFIG_PATH" > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
-
-
-echo "Xray config updated successfully."
-
-# --- Restart X-UI Service ---
-echo "Restarting X-UI service..."
-systemctl restart "$XUI_SERVICE_NAME"
-if systemctl is-active --quiet "$XUI_SERVICE_NAME"; then
-    echo "X-UI service restarted successfully."
-else
-    echo "Error: X-UI service is not active after restart. Please check logs."
-    exit 1
-fi
-
-echo "New proxies with balancer activated on this X-UI server."
+jq --argjson tags_selector "[${NEW_OUTBOUND_TAGS_STR}]" -f - "$XRAY_CONFIG_PATH" <<'EOF_JQ_BALANCER' > "${XRAY_CONFIG_PATH}.tmp" && mv "${XRAY_CONFIG_PATH}.tmp" "$XRAY_CONFIG_PATH"
