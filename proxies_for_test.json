@@ -1,0 +1,12 @@
+[
+  {
+    "server_ip": "IP_سرور_واقعی_شما_مثلا_45.89.111.211", # این رو حتماً عوض کن
+    "proxies": [
+      {"type": "socks5", "ip": "192.228.122.20", "port": 44445, "user": "gargallow", "pass": "mashin"},
+      {"type": "socks5", "ip": "192.228.122.140", "port": 44445, "user": "gargallow", "pass": "mashin"},
+      {"type": "socks5", "ip": "185.186.60.21", "port": 44445, "user": "gargallow", "pass": "mashin"},
+      {"type": "socks5", "ip": "185.186.63.179", "port": 44445, "user": "gargallow", "pass": "mashin"},
+      {"type": "socks5", "ip": "88.209.235.195", "port": 44445, "user": "gargallow", "pass": "mashin"}
+    ]
+  }
+]
